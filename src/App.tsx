@@ -3,33 +3,82 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
-import { DAILY_DROPS, CHOSEN_BOOKS } from './data/initialBooks';
+import React, { useState, useEffect, useMemo } from 'react';
+import { CHOSEN_BOOKS } from './data/initialBooks';
+import { generateDailyDrops, getRealWorldDayOffset } from './utils/dropsEngine';
 import { getTimeUntilMidnight } from './utils/time';
 
+const OFFSET_STORAGE_KEY = 'tldr_simulated_day_offset_v1';
+
 export default function App() {
-  const [selectedDateId, setSelectedDateId] = useState<string>(DAILY_DROPS[0].dateId);
+  // Day offset from launch date (0 = Oct 21, 1 = Oct 22, etc.)
+  const [dayOffset, setDayOffset] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(OFFSET_STORAGE_KEY);
+      if (saved !== null) {
+        return parseInt(saved, 10);
+      }
+    } catch {
+      // fallback
+    }
+    return getRealWorldDayOffset();
+  });
+
+  const allDrops = useMemo(() => generateDailyDrops(dayOffset), [dayOffset]);
+  const todayDrop = allDrops[0];
+
+  const [selectedDateId, setSelectedDateId] = useState<string>(todayDrop.dateId);
   const [selectedBookId, setSelectedBookId] = useState<string>(CHOSEN_BOOKS[0].id);
   const [showArchive, setShowArchive] = useState<boolean>(false);
   const [countdown, setCountdown] = useState(getTimeUntilMidnight());
 
+  // Keep selectedDateId in sync when day offset advances
   useEffect(() => {
+    setSelectedDateId(todayDrop.dateId);
+  }, [todayDrop.dateId]);
+
+  // Live countdown ticker & midnight rollover check
+  useEffect(() => {
+    let lastDate = new Date().getDate();
     const timer = setInterval(() => {
       setCountdown(getTimeUntilMidnight());
+
+      // If midnight passed in real time, advance offset
+      const currentDate = new Date().getDate();
+      if (currentDate !== lastDate) {
+        lastDate = currentDate;
+        setDayOffset((prev) => {
+          const next = prev + 1;
+          localStorage.setItem(OFFSET_STORAGE_KEY, String(next));
+          return next;
+        });
+      }
     }, 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const todayDrop = DAILY_DROPS[0];
-  const currentDrop = DAILY_DROPS.find((d) => d.dateId === selectedDateId) || todayDrop;
+  const currentDrop = allDrops.find((d) => d.dateId === selectedDateId) || todayDrop;
   const isViewingToday = currentDrop.dateId === todayDrop.dateId;
 
-  // Find the selected quote for the current active date
+  // Selected quote for currently active date
   const currentQuote =
     currentDrop.quotes.find((q) => q.bookId === selectedBookId) || currentDrop.quotes[0];
 
-  // Archive drops (past dates)
-  const archiveDrops = DAILY_DROPS.filter((d) => !d.isToday);
+  // Total quotes in archive: 5 per date
+  const totalArchiveQuotes = allDrops.length * 5;
+
+  const handleSimulateNextDay = () => {
+    setDayOffset((prev) => {
+      const next = prev + 1;
+      localStorage.setItem(OFFSET_STORAGE_KEY, String(next));
+      return next;
+    });
+  };
+
+  const handleResetToDay1 = () => {
+    setDayOffset(0);
+    localStorage.setItem(OFFSET_STORAGE_KEY, '0');
+  };
 
   return (
     <div className="min-h-screen bg-[#ffffff] text-[#111111] px-6 py-8 md:px-12 md:py-16 selection:bg-[#111111] selection:text-[#ffffff]">
@@ -44,11 +93,30 @@ export default function App() {
 
             {/* Muted time till next update (10-12px) */}
             <div className="text-[11px] text-[#777777] mb-8 font-normal space-y-1">
-              <p>next update in {countdown.hours}:{countdown.minutes}:{countdown.seconds}</p>
+              <div className="flex items-center gap-2">
+                <span>next update in {countdown.hours}:{countdown.minutes}:{countdown.seconds}</span>
+                <span className="text-[#cccccc]">·</span>
+                <button
+                  onClick={handleSimulateNextDay}
+                  title="Test daily rollover"
+                  className="text-[#999999] hover:text-[#111111] transition-colors"
+                >
+                  +1 day
+                </button>
+                {dayOffset > 0 && (
+                  <button
+                    onClick={handleResetToDay1}
+                    title="Reset to day 1 (Oct 21)"
+                    className="text-[#999999] hover:text-[#111111] transition-colors"
+                  >
+                    reset
+                  </button>
+                )}
+              </div>
               {!isViewingToday && (
                 <button
                   onClick={() => setSelectedDateId(todayDrop.dateId)}
-                  className="text-[#111111] underline underline-offset-2 hover:opacity-75 transition-opacity block"
+                  className="text-[#111111] underline underline-offset-2 hover:opacity-75 transition-opacity block pt-1"
                 >
                   ← back to today ({todayDrop.dateLabel.toLowerCase()})
                 </button>
@@ -88,13 +156,14 @@ export default function App() {
                     showArchive ? 'text-[#111111] font-medium mb-3' : 'text-[#777777] hover:text-[#111111]'
                   }`}
                 >
-                  archive ({archiveDrops.length}) {showArchive ? '—' : '+'}
+                  archive ({totalArchiveQuotes}) {showArchive ? '—' : '+'}
                 </button>
 
                 {showArchive && (
                   <div className="space-y-2.5 pl-3 border-l border-[#eeeeee]">
-                    {archiveDrops.map((drop) => {
+                    {allDrops.map((drop) => {
                       const isDateSelected = drop.dateId === selectedDateId;
+                      const isToday = drop.dateId === todayDrop.dateId;
                       return (
                         <div key={drop.dateId}>
                           <button
@@ -105,7 +174,10 @@ export default function App() {
                                 : 'text-[#777777] hover:text-[#111111]'
                             }`}
                           >
-                            {drop.dateLabel.toLowerCase()}
+                            <span>{drop.dateLabel.toLowerCase()}</span>
+                            {isToday && (
+                              <span className="text-[10px] text-[#999999] ml-2">today</span>
+                            )}
                           </button>
                         </div>
                       );
