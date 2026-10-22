@@ -8,7 +8,43 @@ import { CHOSEN_BOOKS } from './data/initialBooks';
 import { generateDailyDrops, getRealWorldDayOffset } from './utils/dropsEngine';
 import { getTimeUntilMidnight } from './utils/time';
 
+const STORAGE_KEY = 'tldr_book_order_preference';
+
+function getInitialBookOrder() {
+  if (typeof window === 'undefined') return CHOSEN_BOOKS;
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const ids: string[] = JSON.parse(stored);
+      if (Array.isArray(ids) && ids.length > 0) {
+        const bookMap = new Map(CHOSEN_BOOKS.map((b) => [b.id, b]));
+        const reordered: typeof CHOSEN_BOOKS = [];
+        for (const id of ids) {
+          const found = bookMap.get(id);
+          if (found) {
+            reordered.push(found);
+            bookMap.delete(id);
+          }
+        }
+        for (const remaining of bookMap.values()) {
+          reordered.push(remaining);
+        }
+        return reordered;
+      }
+    }
+  } catch {
+    // fallback to default catalog order
+  }
+  return CHOSEN_BOOKS;
+}
+
 export default function App() {
+  // Saved device order of books
+  const [booksList, setBooksList] = useState<typeof CHOSEN_BOOKS>(getInitialBookOrder);
+  const [isEditingOrder, setIsEditingOrder] = useState<boolean>(false);
+  const [draftBooks, setDraftBooks] = useState<typeof CHOSEN_BOOKS>(booksList);
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+
   // Naturally tracks elapsed days from real system time
   const [dayOffset, setDayOffset] = useState<number>(getRealWorldDayOffset);
 
@@ -16,7 +52,7 @@ export default function App() {
   const todayDrop = allDrops[0];
 
   const [selectedDateId, setSelectedDateId] = useState<string>(todayDrop.dateId);
-  const [selectedBookId, setSelectedBookId] = useState<string>(CHOSEN_BOOKS[0].id);
+  const [selectedBookId, setSelectedBookId] = useState<string>(() => booksList[0]?.id || CHOSEN_BOOKS[0].id);
   const [showArchive, setShowArchive] = useState<boolean>(false);
   const [countdown, setCountdown] = useState(getTimeUntilMidnight());
 
@@ -41,6 +77,60 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
+  const handleStartEdit = () => {
+    setDraftBooks([...booksList]);
+    setIsEditingOrder(true);
+  };
+
+  const handleMove = (index: number, direction: -1 | 1) => {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= draftBooks.length) return;
+    setDraftBooks((prev) => {
+      const updated = [...prev];
+      const temp = updated[index];
+      updated[index] = updated[targetIndex];
+      updated[targetIndex] = temp;
+      return updated;
+    });
+  };
+
+  const handleDragStart = (e: React.DragEvent, index: number) => {
+    setDraggedIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDrop = (e: React.DragEvent, targetIndex: number) => {
+    e.preventDefault();
+    if (draggedIndex === null || draggedIndex === targetIndex) return;
+    setDraftBooks((prev) => {
+      const updated = [...prev];
+      const [removed] = updated.splice(draggedIndex, 1);
+      updated.splice(targetIndex, 0, removed);
+      return updated;
+    });
+    setDraggedIndex(null);
+  };
+
+  const handleSaveOrder = () => {
+    setBooksList(draftBooks);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(draftBooks.map((b) => b.id)));
+    } catch {
+      // storage quota or private mode
+    }
+    setIsEditingOrder(false);
+  };
+
+  const handleCancelOrder = () => {
+    setDraftBooks(booksList);
+    setIsEditingOrder(false);
+  };
+
   const currentDrop = allDrops.find((d) => d.dateId === selectedDateId) || todayDrop;
   const isViewingToday = currentDrop.dateId === todayDrop.dateId;
 
@@ -49,12 +139,12 @@ export default function App() {
     currentDrop.quotes.find((q) => q.bookId === selectedBookId) || currentDrop.quotes[0];
 
   // Total quotes in archive across all dates
-  const totalArchiveQuotes = allDrops.length * CHOSEN_BOOKS.length;
+  const totalArchiveQuotes = allDrops.length * booksList.length;
 
   return (
     <div className="min-h-screen bg-[#ffffff] text-[#111111] px-6 py-8 md:px-12 md:py-16 selection:bg-[#111111] selection:text-[#ffffff]">
       <div className="max-w-5xl mx-auto flex flex-col md:flex-row gap-12 md:gap-20 items-start">
-        {/* Left Column: Narrow column for wordmark, 5 book titles, archive by date, and bio */}
+        {/* Left Column: Narrow column for wordmark, reading list, archive by date, and bio */}
         <aside className="w-full md:w-72 lg:w-80 shrink-0 flex flex-col justify-between min-h-[calc(100vh-8rem)]">
           <div>
             {/* Wordmark (24-32px, regular weight) */}
@@ -75,30 +165,114 @@ export default function App() {
               )}
             </div>
 
-            {/* Simple vertical list of the 5 chosen books with authors */}
+            {/* When editing order, show the header bar right above the list */}
+            {isEditingOrder && (
+              <div className="mb-3 flex items-baseline justify-between text-[11px] md:text-[12px] pb-1.5 border-b border-[#eeeeee]">
+                <span className="text-[#888888] font-mono lowercase tracking-wide">
+                  edit order
+                </span>
+                <div className="flex items-center space-x-3 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={handleSaveOrder}
+                    className="text-[#111111] underline underline-offset-2 hover:opacity-70 cursor-pointer lowercase"
+                  >
+                    save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCancelOrder}
+                    className="text-[#888888] hover:text-[#111111] cursor-pointer lowercase"
+                  >
+                    cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
             <nav className="space-y-3.5">
-              {CHOSEN_BOOKS.map((book) => {
-                const isSelected = book.id === selectedBookId;
-                return (
-                  <div key={book.id}>
-                    <button
-                      onClick={() => setSelectedBookId(book.id)}
-                      className={`text-left text-[14px] md:text-[15px] leading-snug transition-colors block w-full ${
-                        isSelected
-                          ? 'text-[#111111] font-medium'
-                          : 'text-[#777777] hover:text-[#111111]'
-                      }`}
+              {/* Reading list */}
+              {isEditingOrder ? (
+                <div className="space-y-2">
+                  {draftBooks.map((book, idx) => (
+                    <div
+                      key={book.id}
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, idx)}
+                      onDragOver={handleDragOver}
+                      onDrop={(e) => handleDrop(e, idx)}
+                      className="flex items-center justify-between text-[13px] md:text-[14px] leading-snug py-0.5 border-b border-transparent hover:border-[#f2f2f2]"
                     >
-                      <span className={isSelected ? 'underline underline-offset-4 decoration-1' : ''}>
-                        {book.title}
-                      </span>
-                      <span className="text-[#888888] font-normal ml-1.5">
-                        — {book.author}
-                      </span>
-                    </button>
-                  </div>
-                );
-              })}
+                      <div className="truncate pr-2 cursor-grab active:cursor-grabbing select-none">
+                        <span className="text-[#222222]">{book.title}</span>
+                        <span className="text-[#888888] text-[12px] ml-1.5">— {book.author}</span>
+                      </div>
+                      <div className="flex items-center space-x-1 shrink-0 font-mono text-[11px] text-[#777777]">
+                        <button
+                          type="button"
+                          disabled={idx === 0}
+                          onClick={() => handleMove(idx, -1)}
+                          className={`px-1 py-0.5 select-none ${
+                            idx === 0 ? 'opacity-20 cursor-default' : 'hover:text-[#111111] cursor-pointer'
+                          }`}
+                          title="Move up"
+                          aria-label={`Move ${book.title} up`}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          disabled={idx === draftBooks.length - 1}
+                          onClick={() => handleMove(idx, 1)}
+                          className={`px-1 py-0.5 select-none ${
+                            idx === draftBooks.length - 1 ? 'opacity-20 cursor-default' : 'hover:text-[#111111] cursor-pointer'
+                          }`}
+                          title="Move down"
+                          aria-label={`Move ${book.title} down`}
+                        >
+                          ↓
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-3.5">
+                  {booksList.map((book, idx) => {
+                    const isSelected = book.id === selectedBookId;
+                    return (
+                      <div key={book.id} className="relative">
+                        {idx === 0 && (
+                          <button
+                            type="button"
+                            onClick={handleStartEdit}
+                            className="absolute -left-5 md:-left-6 top-[2px] w-4 h-4 flex items-center justify-center text-[13px] text-[#777777] hover:text-[#111111] leading-none select-none cursor-pointer p-0 m-0 border-0 bg-transparent"
+                            title="Edit reading list order"
+                            aria-label="Edit order"
+                          >
+                            ↕
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setSelectedBookId(book.id)}
+                          className={`text-left text-[14px] md:text-[15px] leading-snug transition-colors block w-full ${
+                            isSelected
+                              ? 'text-[#111111] font-medium'
+                              : 'text-[#777777] hover:text-[#111111]'
+                          }`}
+                        >
+                          <span className={isSelected ? 'underline underline-offset-4 decoration-1' : ''}>
+                            {book.title}
+                          </span>
+                          <span className="text-[#888888] font-normal ml-1.5">
+                            — {book.author}
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
               {/* Archive separated by date, not by quote or book */}
               <div className="pt-5">
