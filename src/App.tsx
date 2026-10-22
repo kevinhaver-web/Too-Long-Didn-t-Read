@@ -9,6 +9,35 @@ import { generateDailyDrops, getRealWorldDayOffset } from './utils/dropsEngine';
 import { getTimeUntilMidnight } from './utils/time';
 
 const STORAGE_KEY = 'tldr_book_order_preference';
+const EMAIL_STORAGE_KEY = 'tldr_email_subscription';
+
+interface EmailSubscription {
+  email: string;
+  frequency: 'daily' | 'weekdays' | 'weekly';
+  bookIds: string[];
+}
+
+function getStoredSubscription(): EmailSubscription | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(EMAIL_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.email === 'string') {
+        return {
+          email: parsed.email,
+          frequency: parsed.frequency || 'daily',
+          bookIds: Array.isArray(parsed.bookIds) && parsed.bookIds.length > 0
+            ? parsed.bookIds
+            : [CHOSEN_BOOKS[0].id],
+        };
+      }
+    }
+  } catch {
+    // storage unavailable
+  }
+  return null;
+}
 
 function getInitialBookOrder() {
   if (typeof window === 'undefined') return CHOSEN_BOOKS;
@@ -131,6 +160,17 @@ export default function App() {
     setIsEditingOrder(false);
   };
 
+  // Email dispatch subscription state
+  const [subscription, setSubscription] = useState<EmailSubscription | null>(getStoredSubscription);
+  const [showEmailForm, setShowEmailForm] = useState<boolean>(false);
+  const [emailInput, setEmailInput] = useState<string>(() => subscription?.email || '');
+  const [frequency, setFrequency] = useState<'daily' | 'weekdays' | 'weekly'>(
+    () => subscription?.frequency || 'daily'
+  );
+  const [isSendingTest, setIsSendingTest] = useState<boolean>(false);
+  const [testStatusMessage, setTestStatusMessage] = useState<string | null>(null);
+  const [showDigestManager, setShowDigestManager] = useState<boolean>(false);
+
   const currentDrop = allDrops.find((d) => d.dateId === selectedDateId) || todayDrop;
   const isViewingToday = currentDrop.dateId === todayDrop.dateId;
 
@@ -140,6 +180,165 @@ export default function App() {
 
   // Total quotes in archive across all dates
   const totalArchiveQuotes = allDrops.length * booksList.length;
+
+  const handleSaveSubscription = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = emailInput.trim();
+    if (!clean || !clean.includes('@')) return;
+
+    const currentBookIds = subscription?.bookIds?.length
+      ? (subscription.bookIds.includes(currentQuote.bookId)
+          ? subscription.bookIds
+          : [...subscription.bookIds, currentQuote.bookId])
+      : [currentQuote.bookId];
+
+    const updated: EmailSubscription = {
+      email: clean,
+      frequency,
+      bookIds: currentBookIds,
+    };
+    setSubscription(updated);
+    try {
+      localStorage.setItem(EMAIL_STORAGE_KEY, JSON.stringify(updated));
+    } catch {
+      // storage quota or private browsing
+    }
+    fetch('/api/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }).catch(() => {});
+
+    setShowEmailForm(false);
+  };
+
+  const handleAddCurrentBookToDigest = () => {
+    if (!subscription) {
+      setShowEmailForm(true);
+      return;
+    }
+    if (subscription.bookIds.includes(currentQuote.bookId)) return;
+    const nextBookIds = [...subscription.bookIds, currentQuote.bookId];
+    const updated: EmailSubscription = {
+      ...subscription,
+      bookIds: nextBookIds,
+    };
+    setSubscription(updated);
+    try {
+      localStorage.setItem(EMAIL_STORAGE_KEY, JSON.stringify(updated));
+    } catch {}
+    fetch('/api/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }).catch(() => {});
+    setTestStatusMessage(`Added "${currentQuote.title}" to digest (${nextBookIds.length} books in 1 email)`);
+    setTimeout(() => setTestStatusMessage(null), 5000);
+  };
+
+  const handleRemoveCurrentBookFromDigest = () => {
+    if (!subscription) return;
+    const nextBookIds = subscription.bookIds.filter((id) => id !== currentQuote.bookId);
+    if (nextBookIds.length === 0) {
+      handleUnsubscribe();
+      return;
+    }
+    const updated: EmailSubscription = {
+      ...subscription,
+      bookIds: nextBookIds,
+    };
+    setSubscription(updated);
+    try {
+      localStorage.setItem(EMAIL_STORAGE_KEY, JSON.stringify(updated));
+    } catch {}
+    fetch('/api/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }).catch(() => {});
+    setTestStatusMessage(`Removed from digest (${nextBookIds.length} books remaining)`);
+    setTimeout(() => setTestStatusMessage(null), 4000);
+  };
+
+  const handleRemoveBookId = (bookIdToRemove: string) => {
+    if (!subscription) return;
+    const nextBookIds = subscription.bookIds.filter((id) => id !== bookIdToRemove);
+    if (nextBookIds.length === 0) {
+      handleUnsubscribe();
+      return;
+    }
+    const updated: EmailSubscription = {
+      ...subscription,
+      bookIds: nextBookIds,
+    };
+    setSubscription(updated);
+    try {
+      localStorage.setItem(EMAIL_STORAGE_KEY, JSON.stringify(updated));
+    } catch {}
+    fetch('/api/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }).catch(() => {});
+  };
+
+  const handleUnsubscribe = () => {
+    const prevEmail = subscription?.email;
+    setSubscription(null);
+    try {
+      localStorage.removeItem(EMAIL_STORAGE_KEY);
+    } catch {}
+    if (prevEmail) {
+      fetch('/api/unsubscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: prevEmail }),
+      }).catch(() => {});
+    }
+    setShowEmailForm(false);
+    setTestStatusMessage(null);
+  };
+
+  const handleSendTestDigest = async () => {
+    if (!subscription) return;
+    setIsSendingTest(true);
+    setTestStatusMessage('Sending combined test email via Resend...');
+
+    const quotesToSend = subscription.bookIds
+      .map((bId) => todayDrop.quotes.find((q) => q.bookId === bId))
+      .filter(Boolean);
+
+    try {
+      const res = await fetch('/api/send-digest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: subscription.email,
+          frequency: subscription.frequency,
+          quotes: quotesToSend,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setTestStatusMessage(
+          `✓ Sent 1 email with ${quotesToSend.length} ${quotesToSend.length === 1 ? 'reading' : 'readings'} to ${subscription.email}`
+        );
+      } else if (data.missingApiKey) {
+        setTestStatusMessage(
+          `✓ Combined digest ready (${quotesToSend.length} books in 1 email). Add RESEND_API_KEY in .env to deliver live.`
+        );
+      } else {
+        setTestStatusMessage(`Resend response: ${data.error || 'Failed to dispatch'}`);
+      }
+    } catch (err: any) {
+      setTestStatusMessage(`Error: ${err.message || 'Network request failed'}`);
+    } finally {
+      setIsSendingTest(false);
+      setTimeout(() => {
+        setTestStatusMessage((prev) => (prev?.startsWith('Sending') ? null : prev));
+      }, 7000);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#ffffff] text-[#111111] px-6 py-8 md:px-12 md:py-16 selection:bg-[#111111] selection:text-[#ffffff]">
@@ -368,13 +567,233 @@ export default function App() {
               </div>
 
               {/* Strategic Direction (short, terse) */}
-              <div className="mb-12">
+              <div className="mb-10">
                 <div className="text-[11px] uppercase tracking-wider text-[#777777] mb-1.5 font-normal">
                   strategic direction
                 </div>
                 <p className="text-[14px] md:text-[15px] leading-relaxed text-[#222222] font-normal">
                   {currentQuote.strategicDirection}
                 </p>
+              </div>
+
+              {/* Email dispatch signup */}
+              <div className="mt-16 md:mt-24 mb-12">
+                {!showEmailForm && !subscription && (
+                  <button
+                    type="button"
+                    onClick={() => setShowEmailForm(true)}
+                    className="text-[12px] md:text-[13px] text-[#777777] hover:text-[#111111] cursor-pointer transition-none"
+                  >
+                    Email me
+                  </button>
+                )}
+
+                {!showEmailForm && subscription && (
+                  <div className="space-y-2.5 text-[12px] md:text-[13px]">
+                    {/* If current book is NOT yet in the combined digest */}
+                    {!subscription.bookIds.includes(currentQuote.bookId) ? (
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-baseline gap-2">
+                          <button
+                            type="button"
+                            onClick={handleAddCurrentBookToDigest}
+                            className="text-[#111111] hover:opacity-70 cursor-pointer font-normal"
+                          >
+                            + add this book to your email digest
+                          </button>
+                          <span className="text-[#888888] text-[11px]">
+                            ({subscription.bookIds.length} {subscription.bookIds.length === 1 ? 'book' : 'books'} currently in 1 email)
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-[#777777] flex flex-wrap items-baseline gap-2">
+                          <span className="font-mono text-[#444444]">{subscription.email}</span>
+                          <span className="text-[#cccccc]">·</span>
+                          <span>{subscription.frequency}</span>
+                          <span className="text-[#cccccc]">·</span>
+                          <button
+                            type="button"
+                            onClick={handleSendTestDigest}
+                            disabled={isSendingTest}
+                            className="text-[#111111] hover:underline cursor-pointer disabled:opacity-50"
+                          >
+                            {isSendingTest ? 'sending...' : 'send test digest'}
+                          </button>
+                          <span className="text-[#cccccc]">·</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowDigestManager(!showDigestManager)}
+                            className="text-[#777777] hover:text-[#111111] cursor-pointer"
+                          >
+                            {showDigestManager ? 'hide list' : `view digest list (${subscription.bookIds.length})`}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Current book IS in the combined digest */
+                      <div className="space-y-1.5">
+                        <div className="text-[#777777] flex flex-wrap items-baseline gap-2">
+                          <span className="text-[#111111] font-normal">email digest:</span>
+                          <span className="font-mono text-[#111111]">{subscription.email}</span>
+                          <span className="text-[#888888]">
+                            ({subscription.frequency} · {subscription.bookIds.length}{' '}
+                            {subscription.bookIds.length === 1 ? 'book' : 'books'} in 1 email)
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-[#777777]">
+                          <button
+                            type="button"
+                            onClick={handleSendTestDigest}
+                            disabled={isSendingTest}
+                            className="text-[#111111] hover:underline cursor-pointer disabled:opacity-50 font-mono"
+                          >
+                            {isSendingTest ? 'sending...' : 'send test digest now'}
+                          </button>
+                          <span className="text-[#dddddd]">/</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowDigestManager(!showDigestManager)}
+                            className="text-[#777777] hover:text-[#111111] cursor-pointer"
+                          >
+                            {showDigestManager ? 'hide list' : `view digest list (${subscription.bookIds.length})`}
+                          </button>
+                          <span className="text-[#dddddd]">/</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmailInput(subscription.email);
+                              setFrequency(subscription.frequency);
+                              setShowEmailForm(true);
+                            }}
+                            className="text-[#777777] hover:text-[#111111] cursor-pointer"
+                          >
+                            edit
+                          </button>
+                          <span className="text-[#dddddd]">/</span>
+                          {subscription.bookIds.length > 1 ? (
+                            <button
+                              type="button"
+                              onClick={handleRemoveCurrentBookFromDigest}
+                              className="text-[#888888] hover:text-[#111111] cursor-pointer"
+                            >
+                              remove this book
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={handleUnsubscribe}
+                              className="text-[#888888] hover:text-[#111111] cursor-pointer"
+                            >
+                              cancel
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Digest Manager book list */}
+                    {showDigestManager && (
+                      <div className="pt-2.5 pl-3 border-l border-[#eeeeee] space-y-1.5 text-[11px] max-w-md">
+                        <div className="text-[#888888] uppercase tracking-wider text-[10px]">
+                          Books combined into 1 daily email:
+                        </div>
+                        {subscription.bookIds.map((bId) => {
+                          const bookObj = CHOSEN_BOOKS.find((b) => b.id === bId);
+                          const isCurrent = bId === currentQuote.bookId;
+                          return (
+                            <div
+                              key={bId}
+                              className="flex items-center justify-between text-[#333333] py-0.5"
+                            >
+                              <span className={isCurrent ? 'font-medium text-[#111111]' : ''}>
+                                {bookObj?.title || bId}
+                                {isCurrent && (
+                                  <span className="text-[10px] text-[#999999] ml-1.5 font-normal">
+                                    (current)
+                                  </span>
+                                )}
+                              </span>
+                              {subscription.bookIds.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveBookId(bId)}
+                                  className="text-[#aaaaaa] hover:text-[#111111] cursor-pointer ml-3 font-mono text-[12px]"
+                                  title={`Remove ${bookObj?.title || bId} from digest`}
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Feedback / status message */}
+                    {testStatusMessage && (
+                      <div className="text-[11px] font-mono text-[#111111] pt-1">
+                        {testStatusMessage}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {showEmailForm && (
+                  <form onSubmit={handleSaveSubscription} className="space-y-3">
+                    <div className="flex flex-wrap items-baseline gap-2 text-[12px] md:text-[13px]">
+                      <span className="text-[#111111] font-medium">Email me</span>
+                      <span className="text-[#888888]">—</span>
+                      <label htmlFor="email-input" className="text-[#777777]">email:</label>
+                      <input
+                        id="email-input"
+                        type="email"
+                        required
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        placeholder="your@email.com"
+                        className="bg-transparent border-0 border-b border-[#111111] rounded-none px-0 py-0.5 text-[13px] text-[#111111] placeholder:text-[#aaaaaa] focus:outline-none focus:border-[#000000] w-52 md:w-60 font-mono transition-none"
+                        autoFocus
+                      />
+                      <div className="flex items-center space-x-2 pl-1">
+                        <button
+                          type="submit"
+                          className="text-[#111111] underline underline-offset-2 hover:opacity-70 cursor-pointer text-[12px]"
+                        >
+                          save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowEmailForm(false)}
+                          className="text-[#888888] hover:text-[#111111] cursor-pointer text-[12px]"
+                        >
+                          cancel
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 text-[11px] md:text-[12px] text-[#777777]">
+                      <span>frequency:</span>
+                      <div className="flex items-center space-x-2.5 font-mono text-[11px]">
+                        {(['daily', 'weekdays', 'weekly'] as const).map((opt) => (
+                          <button
+                            key={opt}
+                            type="button"
+                            onClick={() => setFrequency(opt)}
+                            className={`cursor-pointer transition-none ${
+                              frequency === opt
+                                ? 'text-[#111111] underline underline-offset-4 decoration-1 font-medium'
+                                : 'text-[#888888] hover:text-[#111111]'
+                            }`}
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                      <span className="text-[#aaaaaa] text-[10px]">
+                        (combines all added books into 1 email)
+                      </span>
+                    </div>
+                  </form>
+                )}
               </div>
             </>
           )}
