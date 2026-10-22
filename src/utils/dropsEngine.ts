@@ -31,7 +31,9 @@ export function getRealWorldDayOffset(): number {
 
 /**
  * Computes all daily drops from launch date (Oct 21, 2026) up to current day offset.
- * Automatically preserves Oct 21 as the founding drop and appends each subsequent day as time passes.
+ * NEVER repeats quotes: sequentially consumes quotes from each catalog.
+ * When all quotes for a book are exhausted, flags `isCompleted: true` so
+ * "all big ideas have been identified" is displayed.
  */
 export function generateDailyDrops(dayOffset: number = 0): DailyDrop[] {
   const safeOffset = Math.max(0, dayOffset);
@@ -42,18 +44,30 @@ export function generateDailyDrops(dayOffset: number = 0): DailyDrop[] {
     dropDate.setDate(dropDate.getDate() + i);
 
     const quotes: BookQuote[] = BOOK_CATALOGS.map((catalog) => {
-      const quoteIndex = i % catalog.quotes.length;
-      const q = catalog.quotes[quoteIndex];
-      return {
-        bookId: catalog.id,
-        title: catalog.title,
-        author: catalog.author,
-        year: catalog.year,
-        page: q.page,
-        quote: q.quote,
-        strategicDirection: q.strategicDirection,
-        realWorldContext: q.realWorldContext,
-      };
+      // Non-repeating sequential consumption
+      if (i < catalog.quotes.length) {
+        const q = catalog.quotes[i];
+        return {
+          bookId: catalog.id,
+          title: catalog.title,
+          author: catalog.author,
+          year: catalog.year,
+          page: q.page,
+          quote: q.quote,
+          strategicDirection: q.strategicDirection,
+          realWorldContext: q.realWorldContext,
+          isCompleted: false,
+        };
+      } else {
+        // All big ideas have been exhausted for this book
+        return {
+          bookId: catalog.id,
+          title: catalog.title,
+          author: catalog.author,
+          year: catalog.year,
+          isCompleted: true,
+        };
+      }
     });
 
     drops.push({

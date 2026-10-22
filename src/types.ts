@@ -4,9 +4,10 @@ export interface BookQuote {
   author: string;
   year?: string;
   page?: number | string;
-  quote: string;
-  strategicDirection: string;
-  realWorldContext: string;
+  quote?: string;
+  strategicDirection?: string;
+  realWorldContext?: string;
+  isCompleted?: boolean;
 }
 
 export interface DailyDrop {

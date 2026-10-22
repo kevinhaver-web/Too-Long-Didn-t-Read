@@ -48,8 +48,8 @@ export default function App() {
   const currentQuote =
     currentDrop.quotes.find((q) => q.bookId === selectedBookId) || currentDrop.quotes[0];
 
-  // Total quotes in archive: 5 per date
-  const totalArchiveQuotes = allDrops.length * 5;
+  // Total quotes in archive across all dates
+  const totalArchiveQuotes = allDrops.length * CHOSEN_BOOKS.length;
 
   return (
     <div className="min-h-screen bg-[#ffffff] text-[#111111] px-6 py-8 md:px-12 md:py-16 selection:bg-[#111111] selection:text-[#ffffff]">
@@ -163,37 +163,47 @@ export default function App() {
             {currentQuote.author} {currentQuote.year && `(${currentQuote.year})`}
           </p>
 
-          {/* The Quote (18-20px, near-black #111) */}
-          <div className="mb-10">
-            <p className="text-[18px] md:text-[20px] text-[#111111] leading-relaxed font-normal">
-              “{currentQuote.quote}”
-            </p>
-            {currentQuote.page && (
-              <p className="text-[11px] text-[#777777] font-normal mt-2">
-                p. {currentQuote.page}
+          {currentQuote.isCompleted ? (
+            <div className="pt-2 pb-12">
+              <p className="text-[15px] md:text-[16px] text-[#777777] font-normal leading-relaxed">
+                all big ideas have been identified
               </p>
-            )}
-          </div>
-
-          {/* Real World Context (clean, no brackets, less is more) */}
-          <div className="mb-8">
-            <div className="text-[11px] uppercase tracking-wider text-[#777777] mb-1.5 font-normal">
-              real world context
             </div>
-            <p className="text-[13px] md:text-[14px] leading-relaxed text-[#444444] font-normal">
-              {currentQuote.realWorldContext}
-            </p>
-          </div>
+          ) : (
+            <>
+              {/* The Quote (18-20px, near-black #111) */}
+              <div className="mb-10">
+                <p className="text-[18px] md:text-[20px] text-[#111111] leading-relaxed font-normal">
+                  “{currentQuote.quote}”
+                </p>
+                {currentQuote.page && (
+                  <p className="text-[11px] text-[#777777] font-normal mt-2">
+                    p. {currentQuote.page}
+                  </p>
+                )}
+              </div>
 
-          {/* Strategic Direction (short, terse) */}
-          <div className="mb-12">
-            <div className="text-[11px] uppercase tracking-wider text-[#777777] mb-1.5 font-normal">
-              strategic direction
-            </div>
-            <p className="text-[14px] md:text-[15px] leading-relaxed text-[#222222] font-normal">
-              {currentQuote.strategicDirection}
-            </p>
-          </div>
+              {/* Real World Context (clean, no brackets, less is more) */}
+              <div className="mb-8">
+                <div className="text-[11px] uppercase tracking-wider text-[#777777] mb-1.5 font-normal">
+                  real world context
+                </div>
+                <p className="text-[13px] md:text-[14px] leading-relaxed text-[#444444] font-normal">
+                  {currentQuote.realWorldContext}
+                </p>
+              </div>
+
+              {/* Strategic Direction (short, terse) */}
+              <div className="mb-12">
+                <div className="text-[11px] uppercase tracking-wider text-[#777777] mb-1.5 font-normal">
+                  strategic direction
+                </div>
+                <p className="text-[14px] md:text-[15px] leading-relaxed text-[#222222] font-normal">
+                  {currentQuote.strategicDirection}
+                </p>
+              </div>
+            </>
+          )}
         </main>
       </div>
     </div>
