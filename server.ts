@@ -28,7 +28,70 @@ export interface SubscriptionRecord {
   frequency: 'daily' | 'weekdays' | 'weekly';
   bookIds: string[];
   updatedAt: string;
-  lastSentDate?: string; // YYYY-MM-DD format to prevent duplicate daily deliveries
+  lastSentDate?: string; // YYYY-MM-DD in subscriber's timezone to prevent duplicate daily deliveries
+  timezone?: string; // e.g. 'Europe/Amsterdam', 'America/New_York'
+  sendHour?: number; // 9 = 9:00 AM local time
+  createdAt?: string;
+  lastSentAt?: string;
+}
+
+export function getSubscriberTimeInfo(timezone: string = 'UTC') {
+  const now = new Date();
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(now);
+    const p: Record<string, string> = {};
+    for (const part of parts) {
+      p[part.type] = part.value;
+    }
+    const localDate = `${p.year}-${p.month}-${p.day}`;
+    const localHour = parseInt(p.hour, 10);
+    const localMinute = parseInt(p.minute, 10);
+
+    const weekdayStr = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      weekday: 'short',
+    }).format(now);
+    const weekdayMap: Record<string, number> = {
+      Sun: 0,
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+    };
+    const dayOfWeek = weekdayMap[weekdayStr] ?? now.getDay();
+
+    return { localDate, localHour, localMinute, dayOfWeek };
+  } catch {
+    const localDate = now.toISOString().slice(0, 10);
+    const localHour = now.getUTCHours();
+    const localMinute = now.getUTCMinutes();
+    const dayOfWeek = now.getUTCDay();
+    return { localDate, localHour, localMinute, dayOfWeek };
+  }
+}
+
+export function getDayOffsetForLocalDate(localDateStr: string): number {
+  try {
+    const [y, m, d] = localDateStr.split('-').map(Number);
+    const targetMidnight = new Date(y, m - 1, d).getTime();
+    const launchMidnight = new Date(2026, 9, 21).getTime(); // Oct 21, 2026
+    const diffTime = targetMidnight - launchMidnight;
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    return Math.max(0, diffDays);
+  } catch {
+    return getRealWorldDayOffset();
+  }
 }
 
 function loadSubscriptions(): SubscriptionRecord[] {
@@ -65,8 +128,10 @@ app.get('/api/subscriptions', (req, res) => {
 });
 
 // Save or update subscription
-app.post('/api/subscribe', (req, res) => {
-  const { email, frequency, bookIds } = req.body;
+// - Sends immediately upon initial sign-up (or when sendImmediate: true)
+// - Subsequent automated deliveries fire at 9:00 AM local time daily
+app.post('/api/subscribe', async (req, res) => {
+  const { email, frequency, bookIds, timezone, sendHour, sendImmediate } = req.body;
   if (!email || typeof email !== 'string' || !email.includes('@')) {
     return res.status(400).json({ error: 'Valid email is required' });
   }
@@ -74,13 +139,60 @@ app.post('/api/subscribe', (req, res) => {
   const cleanEmail = email.trim().toLowerCase();
   const subs = loadSubscriptions();
   const existingIdx = subs.findIndex((s) => s.email.toLowerCase() === cleanEmail);
+  const existing = existingIdx >= 0 ? subs[existingIdx] : null;
+
+  const userTimezone =
+    typeof timezone === 'string' && timezone.trim()
+      ? timezone.trim()
+      : (existing?.timezone || 'UTC');
+  const targetHour = typeof sendHour === 'number' ? sendHour : (existing?.sendHour ?? 9);
+  const timeInfo = getSubscriberTimeInfo(userTimezone);
 
   const newRecord: SubscriptionRecord = {
     email: cleanEmail,
-    frequency: frequency || 'daily',
-    bookIds: Array.isArray(bookIds) && bookIds.length > 0 ? bookIds : ['how-not-to-plan'],
+    frequency: frequency || existing?.frequency || 'daily',
+    bookIds:
+      Array.isArray(bookIds) && bookIds.length > 0
+        ? bookIds
+        : (existing?.bookIds || ['how-not-to-plan']),
+    timezone: userTimezone,
+    sendHour: targetHour,
+    createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    lastSentDate: existing?.lastSentDate,
+    lastSentAt: existing?.lastSentAt,
   };
+
+  let immediateSent = false;
+  let immediateError: string | null = null;
+  let messageId: string | undefined;
+
+  // Immediate send on the day the user signs up
+  const shouldSendNow = Boolean(sendImmediate) || !existing;
+
+  if (shouldSendNow) {
+    try {
+      const dayOffset = getDayOffsetForLocalDate(timeInfo.localDate);
+      const allDrops = generateDailyDrops(dayOffset);
+      const todayDrop = allDrops[0];
+      if (todayDrop) {
+        const userQuotes = todayDrop.quotes.filter((q) => newRecord.bookIds.includes(q.bookId));
+        const quotesToSend = userQuotes.length > 0 ? userQuotes : [todayDrop.quotes[0]];
+
+        const sendResult = await sendDigestEmail(cleanEmail, quotesToSend, newRecord.frequency);
+        if (sendResult.success) {
+          immediateSent = true;
+          messageId = sendResult.messageId;
+          // Set lastSentDate to subscriber's today so they don't get a duplicate at 9 AM today
+          newRecord.lastSentDate = timeInfo.localDate;
+          newRecord.lastSentAt = new Date().toISOString();
+        }
+      }
+    } catch (err: any) {
+      console.error('Error dispatching signup digest email:', err.message);
+      immediateError = err.message;
+    }
+  }
 
   if (existingIdx >= 0) {
     subs[existingIdx] = newRecord;
@@ -89,7 +201,14 @@ app.post('/api/subscribe', (req, res) => {
   }
 
   saveSubscriptions(subs);
-  res.json({ success: true, subscription: newRecord });
+  res.json({
+    success: true,
+    subscription: newRecord,
+    immediateSent,
+    messageId,
+    error: immediateError,
+    timeInfo,
+  });
 });
 
 // Unsubscribe
@@ -233,6 +352,7 @@ async function sendDigestEmail(cleanEmail: string, quotes: any[], frequency: str
 }
 
 // Automated background digest cycle (runs entirely on this server)
+// Checks every subscriber's local time: delivers at 9:00 AM in their timezone
 async function runAutomatedDigestCycle() {
   const apiKey = process.env.RESEND_API_KEY || resendApiKey;
   if (!apiKey) return;
@@ -240,44 +360,54 @@ async function runAutomatedDigestCycle() {
   const subs = loadSubscriptions();
   if (subs.length === 0) return;
 
-  const now = new Date();
-  const todayDateStr = now.toISOString().slice(0, 10);
-  const dayOfWeek = now.getDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
-
-  const allDrops = generateDailyDrops(getRealWorldDayOffset());
-  const todayDrop = allDrops[0];
-  if (!todayDrop) return;
-
   let anyUpdated = false;
 
   for (const sub of subs) {
-    // 1. Skip if already sent today
-    if (sub.lastSentDate === todayDateStr) {
+    const tz = sub.timezone || 'UTC';
+    const timeInfo = getSubscriberTimeInfo(tz);
+    const targetHour = sub.sendHour ?? 9;
+
+    // 1. Skip if already sent today in subscriber's local date
+    if (sub.lastSentDate === timeInfo.localDate) {
       continue;
     }
 
-    // 2. Frequency check
-    if (sub.frequency === 'weekdays' && (dayOfWeek === 0 || dayOfWeek === 6)) {
-      continue;
-    }
-    if (sub.frequency === 'weekly' && dayOfWeek !== 1) {
+    // 2. Check scheduled send hour (9:00 AM local time)
+    // Only send once it is 9:00 AM or later in their timezone
+    if (timeInfo.localHour < targetHour) {
       continue;
     }
 
-    // 3. Assemble quotes for subscribed books
+    // 3. Frequency check
+    if (sub.frequency === 'weekdays' && (timeInfo.dayOfWeek === 0 || timeInfo.dayOfWeek === 6)) {
+      continue;
+    }
+    if (sub.frequency === 'weekly' && timeInfo.dayOfWeek !== 1) {
+      continue;
+    }
+
+    // 4. Assemble quotes for subscriber's local date
+    const dayOffset = getDayOffsetForLocalDate(timeInfo.localDate);
+    const allDrops = generateDailyDrops(dayOffset);
+    const todayDrop = allDrops[0];
+    if (!todayDrop) continue;
+
     const userQuotes = todayDrop.quotes.filter((q) => sub.bookIds.includes(q.bookId));
     const quotesToSend = userQuotes.length > 0 ? userQuotes : [todayDrop.quotes[0]];
 
     try {
-      console.log(`[Auto-Digest] Sending 1 combined email to ${sub.email} (${quotesToSend.length} books)...`);
+      console.log(
+        `[Auto-Digest 9AM] Sending 1 combined email to ${sub.email} (${quotesToSend.length} books) [TZ: ${tz}, Local: ${timeInfo.localDate} ${timeInfo.localHour}:${String(timeInfo.localMinute).padStart(2, '0')}]...`
+      );
       const result = await sendDigestEmail(sub.email, quotesToSend, sub.frequency);
       if (result.success) {
-        sub.lastSentDate = todayDateStr;
+        sub.lastSentDate = timeInfo.localDate;
+        sub.lastSentAt = new Date().toISOString();
         anyUpdated = true;
-        console.log(`[Auto-Digest] Success! Dispatched to ${sub.email} (Message ID: ${result.messageId})`);
+        console.log(`[Auto-Digest 9AM] Success! Dispatched to ${sub.email} (Message ID: ${result.messageId})`);
       }
     } catch (err: any) {
-      console.error(`[Auto-Digest] Delivery error for ${sub.email}:`, err.message);
+      console.error(`[Auto-Digest 9AM] Delivery error for ${sub.email}:`, err.message);
     }
   }
 
@@ -337,10 +467,10 @@ async function startServer() {
     console.log(`Server listening on port ${PORT}`);
     // Run automated cycle on startup
     runAutomatedDigestCycle().catch((e) => console.error('Initial auto-digest error:', e));
-    // Check every 30 minutes for daily scheduled deliveries
+    // Check every 5 minutes for daily 9:00 AM scheduled deliveries
     setInterval(() => {
       runAutomatedDigestCycle().catch((e) => console.error('Interval auto-digest error:', e));
-    }, 30 * 60 * 1000);
+    }, 5 * 60 * 1000);
   });
 }
 

@@ -15,6 +15,8 @@ interface EmailSubscription {
   email: string;
   frequency: 'daily' | 'weekdays' | 'weekly';
   bookIds: string[];
+  timezone?: string;
+  sendHour?: number;
 }
 
 function getStoredSubscription(): EmailSubscription | null {
@@ -30,6 +32,8 @@ function getStoredSubscription(): EmailSubscription | null {
           bookIds: Array.isArray(parsed.bookIds) && parsed.bookIds.length > 0
             ? parsed.bookIds
             : [CHOSEN_BOOKS[0].id],
+          timezone: parsed.timezone || (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC'),
+          sendHour: parsed.sendHour ?? 9,
         };
       }
     }
@@ -181,10 +185,17 @@ export default function App() {
   // Total quotes in archive across all dates
   const totalArchiveQuotes = allDrops.length * booksList.length;
 
-  const handleSaveSubscription = (e: React.FormEvent) => {
+  const handleSaveSubscription = async (e: React.FormEvent) => {
     e.preventDefault();
     const clean = emailInput.trim();
     if (!clean || !clean.includes('@')) return;
+
+    const userTimezone =
+      typeof Intl !== 'undefined' && Intl.DateTimeFormat
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : 'UTC';
+
+    const isFirstTime = !subscription;
 
     const currentBookIds = subscription?.bookIds?.length
       ? (subscription.bookIds.includes(currentQuote.bookId)
@@ -196,6 +207,8 @@ export default function App() {
       email: clean,
       frequency,
       bookIds: currentBookIds,
+      timezone: userTimezone,
+      sendHour: 9,
     };
     setSubscription(updated);
     try {
@@ -203,11 +216,41 @@ export default function App() {
     } catch {
       // storage quota or private browsing
     }
-    fetch('/api/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updated),
-    }).catch(() => {});
+
+    setTestStatusMessage(
+      isFirstTime
+        ? "Subscribing & dispatching today's reading..."
+        : "Updating digest preferences..."
+    );
+
+    try {
+      const res = await fetch('/api/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...updated,
+          timezone: userTimezone,
+          sendHour: 9,
+          sendImmediate: isFirstTime,
+        }),
+      });
+      const data = await res.json();
+      if (data.immediateSent) {
+        setTestStatusMessage(
+          `✓ Subscribed! Today's digest dispatched to ${clean}. Tomorrow & following days arrive daily at 9:00 AM.`
+        );
+      } else {
+        setTestStatusMessage(
+          `✓ Digest updated. Delivers ${frequency} at 9:00 AM.`
+        );
+      }
+    } catch {
+      setTestStatusMessage('✓ Saved preferences.');
+    }
+
+    setTimeout(() => {
+      setTestStatusMessage((prev) => (prev?.startsWith('Subscribing') ? null : prev));
+    }, 7000);
 
     setShowEmailForm(false);
   };
@@ -219,9 +262,16 @@ export default function App() {
     }
     if (subscription.bookIds.includes(currentQuote.bookId)) return;
     const nextBookIds = [...subscription.bookIds, currentQuote.bookId];
+    const userTimezone =
+      typeof Intl !== 'undefined' && Intl.DateTimeFormat
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : (subscription.timezone || 'UTC');
+
     const updated: EmailSubscription = {
       ...subscription,
       bookIds: nextBookIds,
+      timezone: userTimezone,
+      sendHour: 9,
     };
     setSubscription(updated);
     try {
@@ -230,7 +280,12 @@ export default function App() {
     fetch('/api/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updated),
+      body: JSON.stringify({
+        ...updated,
+        timezone: userTimezone,
+        sendHour: 9,
+        sendImmediate: false,
+      }),
     }).catch(() => {});
     setTestStatusMessage(`Added "${currentQuote.title}" to digest (${nextBookIds.length} books in 1 email)`);
     setTimeout(() => setTestStatusMessage(null), 5000);
@@ -243,9 +298,16 @@ export default function App() {
       handleUnsubscribe();
       return;
     }
+    const userTimezone =
+      typeof Intl !== 'undefined' && Intl.DateTimeFormat
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : (subscription.timezone || 'UTC');
+
     const updated: EmailSubscription = {
       ...subscription,
       bookIds: nextBookIds,
+      timezone: userTimezone,
+      sendHour: 9,
     };
     setSubscription(updated);
     try {
@@ -254,7 +316,12 @@ export default function App() {
     fetch('/api/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updated),
+      body: JSON.stringify({
+        ...updated,
+        timezone: userTimezone,
+        sendHour: 9,
+        sendImmediate: false,
+      }),
     }).catch(() => {});
     setTestStatusMessage(`Removed from digest (${nextBookIds.length} books remaining)`);
     setTimeout(() => setTestStatusMessage(null), 4000);
@@ -267,9 +334,16 @@ export default function App() {
       handleUnsubscribe();
       return;
     }
+    const userTimezone =
+      typeof Intl !== 'undefined' && Intl.DateTimeFormat
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : (subscription.timezone || 'UTC');
+
     const updated: EmailSubscription = {
       ...subscription,
       bookIds: nextBookIds,
+      timezone: userTimezone,
+      sendHour: 9,
     };
     setSubscription(updated);
     try {
@@ -278,7 +352,12 @@ export default function App() {
     fetch('/api/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updated),
+      body: JSON.stringify({
+        ...updated,
+        timezone: userTimezone,
+        sendHour: 9,
+        sendImmediate: false,
+      }),
     }).catch(() => {});
   };
 
@@ -608,7 +687,7 @@ export default function App() {
                         <div className="text-[11px] text-[#777777] flex flex-wrap items-baseline gap-2">
                           <span className="font-mono text-[#444444]">{subscription.email}</span>
                           <span className="text-[#cccccc]">·</span>
-                          <span>{subscription.frequency}</span>
+                          <span>{subscription.frequency} · 9:00 am</span>
                           <span className="text-[#cccccc]">·</span>
                           <button
                             type="button"
@@ -635,7 +714,7 @@ export default function App() {
                           <span className="text-[#111111] font-normal">email digest:</span>
                           <span className="font-mono text-[#111111]">{subscription.email}</span>
                           <span className="text-[#888888]">
-                            ({subscription.frequency} · {subscription.bookIds.length}{' '}
+                            ({subscription.frequency} · 9:00 am · {subscription.bookIds.length}{' '}
                             {subscription.bookIds.length === 1 ? 'book' : 'books'} in 1 email)
                           </span>
                         </div>
@@ -791,6 +870,10 @@ export default function App() {
                       <span className="text-[#aaaaaa] text-[10px]">
                         (combines all added books into 1 email)
                       </span>
+                    </div>
+
+                    <div className="text-[11px] text-[#888888] font-normal pt-0.5">
+                      Sends immediately on the day you sign up; subsequent digests arrive daily at 9:00 AM.
                     </div>
                   </form>
                 )}
